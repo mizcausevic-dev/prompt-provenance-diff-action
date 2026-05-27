@@ -1,0 +1,168 @@
+import { execSync } from "node:child_process";
+import { readFileSync, appendFileSync, existsSync } from "node:fs";
+
+import { diffProvenance } from "./diff.js";
+import { toMarkdown } from "./format.js";
+import type { ProvenanceDoc, ProvenanceDiff } from "./types.js";
+
+export interface RunnerEnv {
+  inputs: Record<string, string | undefined>;
+  GITHUB_OUTPUT?: string;
+  GITHUB_EVENT_NAME?: string;
+  GITHUB_REPOSITORY?: string;
+  GITHUB_EVENT_PATH?: string;
+  /** Read a file from disk (current HEAD). Defaults to fs.readFileSync. */
+  readFile?: (path: string) => string;
+  /** Predicate: does this path exist on disk? Defaults to fs.existsSync. */
+  exists?: (path: string) => boolean;
+  /**
+   * Retrieve a file at a given git commit. Returns the file content if the
+   * file existed at that commit, or `null` if it didn't (newly added file).
+   * Defaults to `git show <sha>:<path>` and treats non-zero exit as "missing".
+   */
+  gitShow?: (sha: string, path: string) => string | null;
+  /** Stubbed PR-comment poster for tests. */
+  postComment?: (args: { token: string; repo: string; issueNumber: number; body: string }) => Promise<void>;
+  /** Output stream (defaults to process.stdout). */
+  write?: (line: string) => void;
+}
+
+export interface RunnerResult {
+  exitCode: 0 | 1;
+  diff: ProvenanceDiff | null;
+  /** True when the doc path didn't exist in the base SHA (newly added doc). */
+  newDoc: boolean;
+  commentPosted: boolean;
+  reason?: string;
+}
+
+const NULL_DIFF: ProvenanceDiff = {
+  changes: [],
+  breaking: false,
+  evaluations: { added: [], removed: [] }
+};
+
+function defaultGitShow(sha: string, path: string): string | null {
+  try {
+    return execSync(`git show ${sha}:${path}`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return null;
+  }
+}
+
+export async function run(env: RunnerEnv): Promise<RunnerResult> {
+  const docPath = required(env.inputs, "doc_path");
+  const baseShaInput = env.inputs.base_sha ?? "";
+  const commentOnPr = env.inputs.comment_on_pr ?? "auto";
+  const failOnBreaking = (env.inputs.fail_on_breaking ?? "true").toLowerCase() !== "false";
+  const failOnAnyChange = (env.inputs.fail_on_any_change ?? "false").toLowerCase() === "true";
+  const token = env.inputs.github_token ?? "";
+
+  const read = env.readFile ?? ((p) => readFileSync(p, "utf8"));
+  const exists = env.exists ?? ((p) => existsSync(p));
+  const gitShow = env.gitShow ?? defaultGitShow;
+  const write = env.write ?? ((line) => process.stdout.write(`${line}\n`));
+
+  if (!exists(docPath)) {
+    write(`::error::doc-path "${docPath}" does not exist on disk.`);
+    return { exitCode: 1, diff: null, newDoc: false, commentPosted: false, reason: "doc-path not found" };
+  }
+
+  // Resolve base SHA: explicit input wins, otherwise read from event payload.
+  let baseSha = baseShaInput;
+  if (!baseSha && env.GITHUB_EVENT_PATH && exists(env.GITHUB_EVENT_PATH)) {
+    try {
+      const event = JSON.parse(read(env.GITHUB_EVENT_PATH)) as { pull_request?: { base?: { sha?: string } } };
+      baseSha = event.pull_request?.base?.sha ?? "";
+    } catch {
+      // ignore — fall through
+    }
+  }
+
+  let prev: ProvenanceDoc | null = null;
+  let prevRaw: string | null = null;
+  if (baseSha) prevRaw = gitShow(baseSha, docPath);
+  if (prevRaw !== null) {
+    try {
+      prev = JSON.parse(prevRaw) as ProvenanceDoc;
+    } catch (e) {
+      write(`::warning::could not parse previous ProvenanceDoc at ${baseSha}:${docPath} — treating as new doc. (${(e as Error).message})`);
+      prev = null;
+    }
+  }
+
+  const nextRaw = read(docPath);
+  const next = JSON.parse(nextRaw) as ProvenanceDoc;
+
+  const newDoc = prev === null;
+  const diff = newDoc ? NULL_DIFF : diffProvenance(prev as ProvenanceDoc, next);
+  const markdown = newDoc
+    ? `_New prompt-provenance document at \`${docPath}\` — no previous version found at base SHA ${baseSha || "(no base SHA)"}._`
+    : toMarkdown(diff);
+
+  setOutput(env, "breaking", String(diff.breaking));
+  setOutput(env, "change-count", String(diff.changes.length));
+  setOutput(env, "new-doc", String(newDoc));
+
+  write(`\n${markdown}\n`);
+
+  const isPullRequest = env.GITHUB_EVENT_NAME === "pull_request";
+  const wantsComment = commentOnPr === "true" || (commentOnPr === "auto" && isPullRequest);
+  let commentPosted = false;
+  let reason: string | undefined;
+
+  if (wantsComment) {
+    if (!token) {
+      reason = "no github-token provided";
+    } else if (!env.GITHUB_EVENT_PATH) {
+      reason = "no GITHUB_EVENT_PATH";
+    } else if (!env.GITHUB_REPOSITORY) {
+      reason = "no GITHUB_REPOSITORY";
+    } else {
+      const event = JSON.parse(read(env.GITHUB_EVENT_PATH)) as { number?: number; pull_request?: { number?: number } };
+      const issueNumber = event.number ?? event.pull_request?.number;
+      if (!issueNumber) {
+        reason = "no PR number in event payload";
+      } else {
+        const body = `### Prompt Provenance diff — \`${docPath}\`\n\n${markdown}\n\n_Generated by [prompt-provenance-diff-action](https://github.com/mizcausevic-dev/prompt-provenance-diff-action)._`;
+        const poster = env.postComment ?? defaultPostComment;
+        await poster({ token, repo: env.GITHUB_REPOSITORY, issueNumber, body });
+        commentPosted = true;
+      }
+    }
+  }
+
+  if (!newDoc && failOnBreaking && diff.breaking) {
+    write(`::error::Prompt Provenance diff is BREAKING — ${diff.changes.length} change(s) detected.`);
+    return { exitCode: 1, diff, newDoc, commentPosted, reason };
+  }
+  if (!newDoc && failOnAnyChange && diff.changes.length > 0) {
+    write(`::error::Prompt Provenance doc has ${diff.changes.length} change(s) and fail-on-any-change=true.`);
+    return { exitCode: 1, diff, newDoc, commentPosted, reason };
+  }
+
+  return { exitCode: 0, diff, newDoc, commentPosted, reason };
+}
+
+function required(inputs: Record<string, string | undefined>, name: string): string {
+  const v = inputs[name];
+  if (!v || v.length === 0) throw new Error(`input "${name}" is required`);
+  return v;
+}
+
+function setOutput(env: RunnerEnv, key: string, value: string): void {
+  if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `${key}=${value}\n`);
+}
+
+async function defaultPostComment(args: { token: string; repo: string; issueNumber: number; body: string }): Promise<void> {
+  const r = await fetch(`https://api.github.com/repos/${args.repo}/issues/${args.issueNumber}/comments`, {
+    method: "POST",
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${args.token}`,
+      "X-GitHub-Api-Version": "2022-11-28"
+    },
+    body: JSON.stringify({ body: args.body })
+  });
+  if (!r.ok) throw new Error(`GitHub API comment failed: ${r.status} ${await r.text()}`);
+}

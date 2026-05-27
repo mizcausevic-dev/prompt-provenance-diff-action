@@ -1,0 +1,48 @@
+{
+  "provenance_version": "0.1",
+  "prompt": {
+    "id": "incident-summary-generator",
+    "name": "Incident Summary Generator",
+    "version": "1.1.0",
+    "hash": "sha256:b4c2e9f3d7e9b1f8a6c3d0e2b5f7c9d1e3f5b7c9d1e3f5b7c9d1e3f5b7c9d1e3",
+    "content_uri": "https://example.com/prompts/incident-summary/v1.1.0/template.j2",
+    "content_type": "text/jinja2"
+  },
+  "lineage": {
+    "parent": "incident-summary-generator@1.0.0",
+    "derivation": "fine-tuned wording for SEV-2/3 cases"
+  },
+  "authorship": {
+    "created_by": "mirzacausevic@example.com",
+    "reviewed_by": ["sre-lead@example.com", "compliance@example.com"],
+    "approved_by": "sre-lead@example.com",
+    "created_at": "2026-05-19T01:00:00Z",
+    "approved_at": "2026-05-19T01:30:00Z"
+  },
+  "intent": {
+    "purpose": "Summarize an incident timeline into a 200-word post-mortem opening.",
+    "in_scope": ["production incidents", "SEV-1 through SEV-3"],
+    "out_of_scope": ["root-cause analysis", "blame attribution"],
+    "models_supported": ["claude-opus-4-*", "claude-sonnet-4-*", "gpt-4-*"]
+  },
+  "evaluations": [
+    {
+      "suite": "incident-summary-quality-v3",
+      "result_uri": "https://eval.example.com/runs/1.1.0-a",
+      "score": 0.94,
+      "passed": true,
+      "ran_at": "2026-05-19T01:15:00Z"
+    },
+    {
+      "suite": "pii-leak-guardrail-v1",
+      "result_uri": "https://eval.example.com/runs/1.0.0-b",
+      "score": 1.0,
+      "passed": true,
+      "ran_at": "2026-05-12T01:20:00Z"
+    }
+  ],
+  "approval": {
+    "state": "approved",
+    "policy_uri": "https://policy.example.com/prompts/approval-v2"
+  }
+}
