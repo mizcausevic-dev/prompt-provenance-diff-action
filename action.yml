@@ -1,5 +1,5 @@
 name: "Prompt Provenance Diff"
-description: "PR gate for prompt-provenance document changes. Retrieves the previous version of the doc via `git show <base.sha>:<doc-path>`, diffs against HEAD using prompt-provenance-diff, posts the structured diff as a PR comment, and fails the build on breaking changes (hash, approval, parent, out-of-scope)."
+description: "PR gate for prompt-provenance changes — diffs HEAD vs base, posts a comment, fails on breaking changes."
 author: "mizcausevic-dev"
 branding:
   icon: "git-pull-request"
